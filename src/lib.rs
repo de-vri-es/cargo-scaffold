@@ -404,71 +404,16 @@ impl ScaffoldDescription {
 
         let cyan = Style::new().cyan();
         println!("{} {}", Emoji("🔄", ""), cyan.apply_to("Templating files…"),);
+
+        let context = ScaffoldContext {
+            disable_templating,
+            template_engine,
+            parameters,
+        };
+
         for entry in entries {
             let entry = entry.map_err(|e| anyhow!("cannot read entry : {}", e))?;
-            let entry_path = entry.path().strip_prefix(&self.template_path)?;
-
-            if entry_path == PathBuf::from("") {
-                continue;
-            }
-            if entry.file_type().is_dir() {
-                if entry.path().to_str() == Some(".") {
-                    continue;
-                }
-                let dir_path_to_create = dir_path.join(entry_path);
-                if dir_path_to_create.exists() && self.force {
-                    fs::remove_dir_all(&dir_path_to_create)
-                        .with_context(|| "Cannot remove directory")?;
-                }
-                if dir_path_to_create.exists() && self.append {
-                    continue;
-                }
-                fs::create_dir(dir_path.join(entry_path))
-                    .map_err(|e| anyhow!("cannot create dir : {}", e))?;
-                continue;
-            }
-
-            let filename = entry.path();
-            let mut content = Vec::new();
-            {
-                let mut file =
-                    File::open(filename).map_err(|e| anyhow!("cannot open file : {}", e))?;
-                // TODO add the ability to read a non string file
-                file.read_to_end(&mut content)
-                    .map_err(|e| anyhow!("cannot read file {filename:?} : {}", e))?;
-            }
-            let (path, content) = if disable_templating.is_match(entry_path) {
-                (
-                    dir_path.join(entry_path),
-                    content,
-                )
-            } else {
-                let content = std::str::from_utf8(&content)
-                    .map_err(|_| anyhow!("invalid UTF-8 in {entry_path:?}, consider disabling templating for this file"))?;
-                let rendered_content = template_engine
-                    .render_template(content, &parameters)
-                    .map_err(|e| anyhow!("cannot render template {entry_path:?} : {}", e))?;
-
-                let rendered_path = render_path(&template_engine, &dir_path.join(entry_path), &parameters)?;
-                (rendered_path, rendered_content.into_bytes())
-            };
-
-            let filename_path = PathBuf::from(&path);
-            // We skip the file if the file already exist and if we are in an append mode
-            if filename_path.exists() && !self.force && self.append {
-                continue;
-            }
-
-            let permissions = entry
-                .metadata()
-                .map_err(|e| anyhow!("cannot get metadata for path : {}", e))?
-                .permissions();
-
-            let mut file = OpenOptions::new().write(true).create(true).open(&path)?;
-            file.set_permissions(permissions)
-                .map_err(|e| anyhow!("cannot set permission to file {:?} : {}", path, e))?;
-            file.write_all(&content)
-                .map_err(|e| anyhow!("cannot create file : {}", e))?;
+            self.process_entry(entry, &dir_path, &context)?;
         }
 
         let green = Style::new().green();
@@ -486,8 +431,8 @@ impl ScaffoldDescription {
         );
 
         if let Some(notes) = &self.template.notes {
-            let rendered_notes = template_engine
-                .render_template(notes, &parameters)
+            let rendered_notes = context
+                .render_template(notes)
                 .map_err(|e| anyhow!("cannot render template for path : {}", e))?;
             println!("{}", rendered_notes);
             println!(
@@ -543,6 +488,73 @@ impl ScaffoldDescription {
         Ok(())
     }
 
+    fn process_entry(&self, entry: walkdir::DirEntry, dir_path: &Path, context: &ScaffoldContext) -> Result<()> {
+        let entry_path = entry.path().strip_prefix(&self.template_path)?;
+
+        if entry_path == PathBuf::from("") {
+            return Ok(());
+        }
+        if entry.file_type().is_dir() {
+            if entry.path().to_str() == Some(".") {
+                return Ok(());
+            }
+            let dir_path_to_create = dir_path.join(entry_path);
+            if dir_path_to_create.exists() && self.force {
+                fs::remove_dir_all(&dir_path_to_create)
+                    .with_context(|| "Cannot remove directory")?;
+            }
+            if dir_path_to_create.exists() && self.append {
+                return Ok(());
+            }
+            fs::create_dir(dir_path.join(entry_path))
+                .map_err(|e| anyhow!("cannot create dir : {}", e))?;
+            return Ok(());
+        }
+
+        let filename = entry.path();
+        let mut content = Vec::new();
+        {
+            let mut file =
+                File::open(filename).map_err(|e| anyhow!("cannot open file : {}", e))?;
+            // TODO add the ability to read a non string file
+            file.read_to_end(&mut content)
+                .map_err(|e| anyhow!("cannot read file {filename:?} : {}", e))?;
+            }
+        let (path, content) = if context.disable_templating.is_match(entry_path) {
+            (
+                dir_path.join(entry_path),
+                content,
+            )
+        } else {
+            let content = std::str::from_utf8(&content)
+                .map_err(|_| anyhow!("invalid UTF-8 in {entry_path:?}, consider disabling templating for this file"))?;
+            let rendered_content = context
+                .render_template(content)
+                .map_err(|e| anyhow!("cannot render template {entry_path:?} : {}", e))?;
+
+            let rendered_path = context.render_path(&dir_path.join(entry_path))?;
+            (rendered_path, rendered_content.into_bytes())
+        };
+
+        let filename_path = PathBuf::from(&path);
+        // We skip the file if the file already exist and if we are in an append mode
+        if filename_path.exists() && !self.force && self.append {
+            return Ok(());
+        }
+
+        let permissions = entry
+            .metadata()
+            .map_err(|e| anyhow!("cannot get metadata for path : {}", e))?
+            .permissions();
+
+        let mut file = OpenOptions::new().write(true).create(true).open(&path)?;
+        file.set_permissions(permissions)
+            .map_err(|e| anyhow!("cannot set permission to file {:?} : {}", path, e))?;
+        file.write_all(&content)
+            .map_err(|e| anyhow!("cannot create file : {}", e))?;
+        Ok(())
+    }
+
     pub fn run_cmd(cmd: &str) -> Result<()> {
         let mut command = ScaffoldDescription::setup_cmd(cmd)?;
         let mut child = command.spawn().expect("cannot execute command");
@@ -564,27 +576,36 @@ impl ScaffoldDescription {
     }
 }
 
-
-fn render_path(template_engine: &Handlebars, path: &Path, parameters: &BTreeMap<String, Value>) -> Result<PathBuf> {
-    // The backslash character used as path separator on windows is an escape character for handlebars.
-    // Avoid passing it to the template renderer by expanding each path component individually.
-    // This also prevents strange patterns where template placeholders span across single folder/file names.
-    let mut output = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(component) => {
-                let component = component.to_str().ok_or_else(|| anyhow!("invalid Unicode path: {path:?}"))?;
-                let rendered = template_engine.render_template(component, parameters)
-                    .map_err(|e| anyhow!("cannot render template for path {path:?} : {}", e))?;
-                output.push(rendered);
-            },
-            component => output.push(component)
-        };
-    }
-    Ok(output)
+struct ScaffoldContext<'a> {
+    disable_templating: globset::GlobSet,
+    template_engine: Handlebars<'a>,
+    parameters: BTreeMap<String, Value>,
 }
 
+impl ScaffoldContext<'_> {
+    fn render_template(&self, template_string: &str) -> Result<String, handlebars::RenderError> {
+        self.template_engine.render_template(template_string, &self.parameters)
+    }
 
+    fn render_path(&self, path: &Path) -> Result<PathBuf> {
+        // The backslash character used as path separator on windows is an escape character for handlebars.
+        // Avoid passing it to the template renderer by expanding each path component individually.
+        // This also prevents strange patterns where template placeholders span across single folder/file names.
+        let mut output = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(component) => {
+                    let component = component.to_str().ok_or_else(|| anyhow!("invalid Unicode path: {path:?}"))?;
+                    let rendered = self.template_engine.render_template(component, &self.parameters)
+                        .map_err(|e| anyhow!("cannot render template for path {path:?} : {}", e))?;
+                    output.push(rendered);
+                },
+                component => output.push(component)
+            };
+        }
+        Ok(output)
+    }
+}
 
 impl Parameter {
     fn to_value_interactive(&self) -> Result<toml::Value> {
@@ -656,9 +677,9 @@ impl Parameter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{render_path, Handlebars, BTreeMap};
+    use crate::{Handlebars, BTreeMap};
 
-    use super::ScaffoldDescription;
+    use super::{ScaffoldDescription, ScaffoldContext};
     use std::fs::{remove_file, File};
     use std::io::Write;
     use std::path::Path;
@@ -674,10 +695,16 @@ mod tests {
         let mut parameters = BTreeMap::new();
         parameters.insert("snake_name".to_string(), "tracing".to_string().into());
 
+        let context = ScaffoldContext {
+            disable_templating: Default::default(),
+            template_engine,
+            parameters,
+        };
+
         let path = Path::new(
             "\\\\?\\C:\\Users\\Ignition\\AppData\\Local\\Temp\\router_scaffoldXwTZ11\\src\\plugins\\{{snake_name}}.rs"
         );
-        let res = render_path(&template_engine, path, &parameters).unwrap();
+        let res = context.render_path(path).unwrap();
 
         assert_eq!(Path::new("\\\\?\\C:\\Users\\Ignition\\AppData\\Local\\Temp\\router_scaffoldXwTZ11\\src\\plugins\\tracing.rs"), res);
     }
@@ -692,10 +719,16 @@ mod tests {
         let mut parameters = BTreeMap::new();
         parameters.insert("snake_name".to_string(), "tracing".to_string().into());
 
+        let context = ScaffoldContext {
+            disable_templating: Default::default(),
+            template_engine,
+            parameters,
+        };
+
         let path = Path::new(
             "/tmp/router_scaffoldXwTZ11/src/plugins/{{snake_name}}.rs"
         );
-        let res = render_path(&template_engine, path, &parameters).unwrap();
+        let res = context.render_path(path).unwrap();
 
         assert_eq!(Path::new("/tmp/router_scaffoldXwTZ11/src/plugins/tracing.rs"), res);
     }
